@@ -1614,6 +1614,7 @@ async def _async_handle_create_ip_button(call: ServiceCall):
         raise ValueError("headers must be a mapping")
 
     if device_id is not None:
+        key_index = int(call.data.get("key_index", 1))
         result = await hass.async_add_executor_job(
             functools.partial(
                 hub._proxy.add_ip_button_to_device,
@@ -1622,6 +1623,7 @@ async def _async_handle_create_ip_button(call: ServiceCall):
                 method=method,
                 url=url,
                 headers=headers,
+                key_index=key_index,
             ),
         )
     else:

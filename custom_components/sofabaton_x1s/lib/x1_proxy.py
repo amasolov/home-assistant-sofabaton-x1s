@@ -4771,20 +4771,23 @@ class X1Proxy:
         method: str,
         url: str,
         headers: dict[str, str],
+        key_index: int = 1,
     ) -> dict[str, Any] | None:
         """Add an IP-backed command to an existing device.
 
         Uses the native protocol: CMD=14 (key sync) + CMD=8 (commit)
         + REMOTE_SYNC, each sent sequentially with delays.
+
+        ``key_index`` is the 0-based position of this button within the
+        device (0 is the first button created with the device itself).
+        The caller must track and increment this for each button added.
         """
         if not self.can_issue_commands():
             self._log.info("[CREATE] add_ip_button_to_device ignored: proxy client is connected")
             return None
 
-        self.request_ip_commands_for_device(device_id, wait=True)
-        existing = self.state.ip_buttons.get(device_id & 0xFF, {})
-        next_key_id = (max(existing.keys()) + 1) if existing else 1
-        total_keys = next_key_id
+        key_id = key_index
+        total_keys = key_index + 1
 
         device_name = self.state.devices.get(device_id & 0xFF, {}).get("name", f"Device {device_id}")
         overhead = b"\x01" + (1).to_bytes(2, "big")
@@ -4792,17 +4795,16 @@ class X1Proxy:
         # --- CMD=14: key sync ---
         pulse = self._build_ip_pulse(method, url, headers)
         key_frame = self._build_key_frame_x2(
-            key_index=next_key_id - 1,
+            key_index=key_index,
             total_keys=total_keys,
             device_id=device_id,
-            key_id=next_key_id,
+            key_id=key_id,
             key_name=button_name,
             ip=self._extract_host(url),
             port=self._extract_port(url),
             pulse=pulse,
         )
 
-        self.start_roku_create()
         self._log.info(
             "[CREATE] sending CMD=14 (key sync) dev=%d key='%s'",
             device_id, button_name,
@@ -4835,7 +4837,6 @@ class X1Proxy:
             "[CREATE] added button '%s' to device %d ('%s')",
             button_name, device_id, device_name,
         )
-        self.request_ip_commands_for_device(device_id, wait=True)
         return {
             "device_name": device_name,
             "button_name": button_name,
@@ -4843,7 +4844,7 @@ class X1Proxy:
             "url": url,
             "headers": headers,
             "device_id": device_id,
-            "button_id": next_key_id,
+            "button_id": key_id,
             "status": "success",
         }
 
