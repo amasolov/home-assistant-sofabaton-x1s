@@ -82,6 +82,7 @@ if TYPE_CHECKING:
 
 
 OP_CREATE_DEVICE_ACK = 0x0107
+OP_CREATE_ACTIVITY_ACK = 0x0137
 
 
 def _consume_length_prefixed_string(buf: bytes, offset: int) -> tuple[str, int]:
@@ -503,9 +504,9 @@ class SaveCommitHandler(BaseFrameHandler):
         proxy._log.info("[CREATE] save commit/ack success")
 
 
-@register_handler(opcodes=(OP_CREATE_DEVICE_ACK,), directions=("H→A",))
+@register_handler(opcodes=(OP_CREATE_DEVICE_ACK, OP_CREATE_ACTIVITY_ACK), directions=("H→A",))
 class RokuCreateDeviceAckHandler(BaseFrameHandler):
-    """Capture device id from create-device ack during Roku replay."""
+    """Capture device/activity id from create ack (CMD=7 → 0x0107, CMD=55 → 0x0137)."""
 
     def handle(self, frame: FrameContext) -> None:
         payload = frame.payload
@@ -514,7 +515,8 @@ class RokuCreateDeviceAckHandler(BaseFrameHandler):
         proxy: X1Proxy = frame.proxy
         proxy.update_roku_device_id(payload[0])
         proxy.notify_roku_ack(frame.opcode, payload)
-        proxy._log.info("[WIFI] create ack device_id=0x%02X", payload[0])
+        kind = "activity" if frame.opcode == OP_CREATE_ACTIVITY_ACK else "device"
+        proxy._log.info("[WIFI] create ack %s_id=0x%02X", kind, payload[0])
 
 
 @register_handler(opcodes=(0x0103, 0x013E, 0x0112), directions=("H→A",))
