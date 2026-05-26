@@ -624,7 +624,7 @@ class X1Proxy:
     def _build_native_frame(self, cmd: int, overhead: bytes, data: bytes) -> bytes:
         """Build a frame in the hub's native [SYNC0][SYNC1][LEN][CMD][overhead][data][checksum] format."""
         payload = overhead + data
-        frame = bytearray([SYNC0, SYNC1, (len(payload) + 1) & 0xFF, cmd & 0xFF])
+        frame = bytearray([SYNC0, SYNC1, len(payload) & 0xFF, cmd & 0xFF])
         frame.extend(payload)
         frame.append(_sum8(frame))
         return bytes(frame)
