@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 import logging
 from pathlib import Path
@@ -1211,8 +1212,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.services.async_register(DOMAIN, "command_to_button", _async_handle_command_to_button)
     if not hass.services.has_service(DOMAIN, "sync_command_config"):
         hass.services.async_register(DOMAIN, "sync_command_config", _async_handle_sync_command_config)
-    #if not hass.services.has_service(DOMAIN, "create_ip_button"):
-    #    hass.services.async_register(DOMAIN, "create_ip_button", _async_handle_create_ip_button)
+    if not hass.services.has_service(DOMAIN, "create_ip_button"):
+        hass.services.async_register(DOMAIN, "create_ip_button", _async_handle_create_ip_button)
 
     hass.data[DOMAIN][entry.entry_id] = hub
 
@@ -1264,7 +1265,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.services.async_remove(DOMAIN, "delete_favorite")
             hass.services.async_remove(DOMAIN, "command_to_button")
             hass.services.async_remove(DOMAIN, "sync_command_config")
-            #hass.services.async_remove(DOMAIN, "create_ip_button")
+            hass.services.async_remove(DOMAIN, "create_ip_button")
             async_teardown_diagnostics(hass)
             if hass.data[DOMAIN].get("frontend_registered"):
                 if _get_lovelace_resource_mode(hass) == _LOVELACE_STORAGE_MODE:
@@ -1614,21 +1615,25 @@ async def _async_handle_create_ip_button(call: ServiceCall):
 
     if device_id is not None:
         result = await hass.async_add_executor_job(
-            hub._proxy.add_ip_button_to_device,
-            int(device_id),
-            button_name,
-            method,
-            url,
-            headers,
+            functools.partial(
+                hub._proxy.add_ip_button_to_device,
+                device_id=int(device_id),
+                button_name=button_name,
+                method=method,
+                url=url,
+                headers=headers,
+            ),
         )
     else:
         result = await hass.async_add_executor_job(
-            hub._proxy.create_ip_button,
-            device_name,
-            button_name,
-            method,
-            url,
-            headers,
+            functools.partial(
+                hub._proxy.create_ip_button,
+                device_name=device_name,
+                button_name=button_name,
+                method=method,
+                url=url,
+                headers=headers,
+            ),
         )
 
     return result or {}

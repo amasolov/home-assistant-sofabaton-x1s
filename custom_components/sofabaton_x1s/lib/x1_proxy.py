@@ -605,12 +605,142 @@ class X1Proxy:
         truncated = data[:length]
         return truncated + b"\x00" * max(0, length - len(truncated))
 
+    def _utf16be_padded(self, text: str, *, length: int) -> bytes:
+        data = text.encode("utf-16-be")
+        truncated = data[:length]
+        return truncated + b"\x00" * max(0, length - len(truncated))
+
     def _encode_len_prefixed(self, blob: bytes, *, max_len: int = 255) -> bytes:
         limited = blob[:max_len]
         return bytes([len(limited)]) + limited
 
     def _encode_headers(self, headers: dict[str, str]) -> bytes:
         return "\r\n".join(f"{k}: {v}" for k, v in headers.items()).encode("utf-8")
+
+    # -----------------------------------------------------------------
+    # Native frame builders (X2 / X1S hub protocol)
+    # -----------------------------------------------------------------
+
+    def _build_native_frame(self, cmd: int, overhead: bytes, data: bytes) -> bytes:
+        """Build a frame in the hub's native [SYNC0][SYNC1][LEN][CMD][overhead][data][checksum] format."""
+        payload = overhead + data
+        frame = bytearray([SYNC0, SYNC1, (len(payload) + 1) & 0xFF, cmd & 0xFF])
+        frame.extend(payload)
+        frame.append(_sum8(frame))
+        return bytes(frame)
+
+    def _build_device_data_x2(
+        self,
+        name: str,
+        *,
+        icon: int = 1,
+        device_id: int = 0xFF,
+        sign: int = 0,
+        commit: bool = False,
+    ) -> bytes:
+        """Build 210-byte X2 device payload for CMD=7 (create) or CMD=8 (commit)."""
+        d = bytearray(210)
+        d[0] = 0x01
+        d[1:3] = (1).to_bytes(2, "big")
+        d[3] = sign & 0xFF
+        d[4] = device_id & 0xFF
+        d[5] = icon & 0xFF
+        d[6] = 0x00                                        # sort
+        d[7] = 28                                          # codeType: WiFi DIY
+        d[8] = 16                                          # type: WiFi
+        d[29:89] = self._utf16be_padded(name, length=60)
+        d[89:149] = self._utf16be_padded(name, length=60)  # brand = name
+
+        cfg = bytearray(60)
+        cfg[6] = 0xFC
+        cfg[9] = 0xFC
+        cfg[14] = 0xFC
+        cfg[16] = 0xFC
+        if commit:
+            cfg[17] = 0x01
+        d[149:209] = cfg
+        d[209] = _sum8(d[:209])
+        return bytes(d)
+
+    def _build_key_frame_x2(
+        self,
+        *,
+        key_index: int,
+        total_keys: int,
+        device_id: int,
+        key_id: int,
+        key_name: str,
+        ip: str,
+        port: int,
+        pulse: str,
+    ) -> bytes:
+        """Build CMD=14 key-sync frame in X2 format (81-byte overhead, UTF-16BE)."""
+        pulse_bytes = pulse.encode("ascii", errors="replace")
+        pulse_len = len(pulse_bytes)
+
+        ip_block = bytearray(pulse_len + 8)
+        for i, p in enumerate(ip.split(".")[:4]):
+            ip_block[i] = int(p) & 0xFF
+        ip_block[4:6] = port.to_bytes(2, "big")
+        ip_block[6:8] = pulse_len.to_bytes(2, "big")
+        ip_block[8 : 8 + pulse_len] = pulse_bytes
+
+        key_data_len = pulse_len + 81
+        total_pages = (key_data_len + 246) // 247
+
+        kd = bytearray(key_data_len)
+        kd[0] = total_keys & 0xFF
+        kd[1:3] = total_pages.to_bytes(2, "big")
+        kd[3] = device_id & 0xFF
+        kd[4] = key_id & 0xFF
+        kd[5] = 0x1C                                      # codeType: WiFi DIY
+        kd[12:72] = self._utf16be_padded(key_name, length=60)
+        kd[72 : 72 + len(ip_block)] = ip_block
+        kd[key_data_len - 1] = _sum8(kd[: key_data_len - 1])
+
+        all_frames = bytearray()
+        for page_idx in range(total_pages):
+            offset = page_idx * 247
+            end = min(offset + 247, key_data_len)
+            chunk = kd[offset:end]
+            f = bytearray()
+            f.extend([SYNC0, SYNC1, (len(chunk) + 3) & 0xFF, 0x0E])
+            f.append((key_index + 1) & 0xFF)
+            f.extend((page_idx + 1).to_bytes(2, "big"))
+            f.extend(chunk)
+            f.append(_sum8(f))
+            all_frames.extend(f)
+        return bytes(all_frames)
+
+    def _build_ip_pulse(
+        self,
+        method: str,
+        url: str,
+        headers: dict[str, str],
+    ) -> str:
+        """Build the raw HTTP request string the hub sends when a key is pressed."""
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+
+        parts = [f"{method} {path} HTTP/1.1\r\n", f"Host:{host}:{port}\r\n"]
+        for k, v in headers.items():
+            parts.append(f"{k}:{v}\r\n")
+        parts.append("\r\n")
+        return "".join(parts)
+
+    def _send_native_frame(self, cmd: int, overhead: bytes, data: bytes) -> None:
+        """Build and send a native-format frame to the hub."""
+        frame = self._build_native_frame(cmd, overhead, data)
+        self._log.info("[SEND] native CMD=0x%02X %dB", cmd, len(frame))
+        self.transport.send_local(frame)
+        if self.diag_dump:
+            self._log.info("[DUMP] →hub %s", _hexdump(frame))
 
     def enqueue_cmd(
         self,
@@ -4538,40 +4668,100 @@ class X1Proxy:
         url: str,
         headers: dict[str, str],
     ) -> dict[str, Any] | None:
+        """Create a new IP device on the hub with one button.
+
+        Uses the hub's native protocol: CMD=7 (create), CMD=14 (key sync),
+        CMD=8 (commit), then REMOTE_SYNC.  Each frame is sent individually
+        with a delay so the hub can process them one at a time.
+        """
         if not self.can_issue_commands():
             self._log.info("[CREATE] create_ip_button ignored: proxy client is connected")
             return None
 
-        frames = self._build_virtual_device_frames(
-            device_name=device_name,
-            button_name=button_name,
-            method=method,
-            url=url,
-            headers=headers,
+        overhead = b"\x01" + (1).to_bytes(2, "big")  # action=1, count=1
+
+        # --- CMD=7: create device ---
+        create_data = self._build_device_data_x2(device_name, device_id=0xFF)
+        create_frame = self._build_native_frame(0x07, overhead, create_data)
+
+        self.start_roku_create()
+        self._log.info("[CREATE] sending CMD=7 (create) for '%s'", device_name)
+        self.transport.send_local(create_frame)
+        if self.diag_dump:
+            self._log.info("[DUMP] →hub %s", _hexdump(create_frame))
+
+        device_id = self.wait_for_roku_device_id(timeout=3.0)
+        if device_id is None:
+            self._log.warning("[CREATE] hub did not assign device_id after CMD=7")
+            return None
+        self._log.info("[CREATE] hub assigned device_id=%d", device_id)
+
+        # --- CMD=14: key sync ---
+        pulse = self._build_ip_pulse(method, url, headers)
+        key_frame = self._build_key_frame_x2(
+            key_index=0,
+            total_keys=1,
+            device_id=device_id,
+            key_id=0,
+            key_name=button_name,
+            ip=self._extract_host(url),
+            port=self._extract_port(url),
+            pulse=pulse,
         )
 
-        self.start_virtual_device(
-            device_name=device_name,
-            button_name=button_name,
-            method=method,
-            url=url,
-            headers=headers,
+        time.sleep(1)
+        self._log.info("[CREATE] sending CMD=14 (key sync) for '%s'", button_name)
+        self.transport.send_local(key_frame)
+        if self.diag_dump:
+            self._log.info("[DUMP] →hub %s", _hexdump(key_frame))
+
+        # --- CMD=8: commit ---
+        commit_data = self._build_device_data_x2(
+            device_name, device_id=device_id, commit=True,
         )
+        commit_frame = self._build_native_frame(0x08, overhead, commit_data)
 
-        for opcode, payload in frames:
-            self._send_cmd_frame(opcode, payload)
-            time.sleep(0.05)
+        time.sleep(1)
+        self._log.info("[CREATE] sending CMD=8 (commit) dev=%d", device_id)
+        self.transport.send_local(commit_frame)
+        if self.diag_dump:
+            self._log.info("[DUMP] →hub %s", _hexdump(commit_frame))
 
-        result = self.wait_for_virtual_device(timeout=3.0)
-        if result and result.get("device_id") is not None:
-            self._log.info(
-                "[CREATE] virtual dev=0x%04X btn=%s method=%s url=%s",
-                result.get("device_id", 0),
-                result.get("button_id"),
-                result.get("method"),
-                result.get("url"),
-            )
-        return result
+        # --- REMOTE_SYNC ---
+        sync_frame = self._build_frame(OP_REMOTE_SYNC, b"")
+
+        time.sleep(1)
+        self._log.info("[CREATE] sending REMOTE_SYNC")
+        self.transport.send_local(sync_frame)
+
+        time.sleep(1)
+        self._log.info(
+            "[CREATE] device '%s' created with id=%d, button='%s'",
+            device_name, device_id, button_name,
+        )
+        return {
+            "device_name": device_name,
+            "button_name": button_name,
+            "method": method,
+            "url": url,
+            "headers": headers,
+            "device_id": device_id,
+            "button_id": 0,
+            "status": "success",
+        }
+
+    @staticmethod
+    def _extract_host(url: str) -> str:
+        from urllib.parse import urlparse
+        return urlparse(url).hostname or "127.0.0.1"
+
+    @staticmethod
+    def _extract_port(url: str) -> int:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if parsed.port:
+            return parsed.port
+        return 443 if parsed.scheme == "https" else 80
 
     def add_ip_button_to_device(
         self,
@@ -4582,40 +4772,80 @@ class X1Proxy:
         url: str,
         headers: dict[str, str],
     ) -> dict[str, Any] | None:
-        """Add an IP-backed command to an existing device."""
+        """Add an IP-backed command to an existing device.
 
+        Uses the native protocol: CMD=14 (key sync) + CMD=8 (commit)
+        + REMOTE_SYNC, each sent sequentially with delays.
+        """
         if not self.can_issue_commands():
             self._log.info("[CREATE] add_ip_button_to_device ignored: proxy client is connected")
             return None
 
         self.request_ip_commands_for_device(device_id, wait=True)
         existing = self.state.ip_buttons.get(device_id & 0xFF, {})
-        next_button_id = (max(existing.keys()) + 1) if existing else 1
+        next_key_id = (max(existing.keys()) + 1) if existing else 1
+        total_keys = next_key_id
 
         device_name = self.state.devices.get(device_id & 0xFF, {}).get("name", f"Device {device_id}")
+        overhead = b"\x01" + (1).to_bytes(2, "big")
 
-        opcode, payload = self._build_existing_device_frame(
+        # --- CMD=14: key sync ---
+        pulse = self._build_ip_pulse(method, url, headers)
+        key_frame = self._build_key_frame_x2(
+            key_index=next_key_id - 1,
+            total_keys=total_keys,
             device_id=device_id,
-            button_id=next_button_id,
-            button_name=button_name,
-            method=method,
-            url=url,
-            headers=headers,
+            key_id=next_key_id,
+            key_name=button_name,
+            ip=self._extract_host(url),
+            port=self._extract_port(url),
+            pulse=pulse,
         )
 
-        self.start_virtual_device(
-            device_name=device_name,
-            button_name=button_name,
-            method=method,
-            url=url,
-            headers=headers,
+        self.start_roku_create()
+        self._log.info(
+            "[CREATE] sending CMD=14 (key sync) dev=%d key='%s'",
+            device_id, button_name,
         )
+        self.transport.send_local(key_frame)
+        if self.diag_dump:
+            self._log.info("[DUMP] →hub %s", _hexdump(key_frame))
 
-        self._send_cmd_frame(opcode, payload)
+        # --- CMD=8: commit ---
+        commit_data = self._build_device_data_x2(
+            device_name, device_id=device_id, commit=True,
+        )
+        commit_frame = self._build_native_frame(0x08, overhead, commit_data)
 
-        result = self.wait_for_virtual_device(timeout=3.0)
+        time.sleep(1)
+        self._log.info("[CREATE] sending CMD=8 (commit) dev=%d", device_id)
+        self.transport.send_local(commit_frame)
+        if self.diag_dump:
+            self._log.info("[DUMP] →hub %s", _hexdump(commit_frame))
+
+        # --- REMOTE_SYNC ---
+        sync_frame = self._build_frame(OP_REMOTE_SYNC, b"")
+
+        time.sleep(1)
+        self._log.info("[CREATE] sending REMOTE_SYNC")
+        self.transport.send_local(sync_frame)
+
+        time.sleep(1)
+        self._log.info(
+            "[CREATE] added button '%s' to device %d ('%s')",
+            button_name, device_id, device_name,
+        )
         self.request_ip_commands_for_device(device_id, wait=True)
-        return result
+        return {
+            "device_name": device_name,
+            "button_name": button_name,
+            "method": method,
+            "url": url,
+            "headers": headers,
+            "device_id": device_id,
+            "button_id": next_key_id,
+            "status": "success",
+        }
 
     # ---------------------------------------------------------------------
     # mDNS advertisement

@@ -76,6 +76,13 @@ OP_DEVICE_SAVE_HEAD = 0x8D5D  # hub assigns device id
 OP_SAVE_COMMIT = 0x6501
 ACK_SUCCESS = 0x0301
 
+# Native single-byte commands used for IP device creation.
+# The hub frame format is [SYNC0][SYNC1][LEN][CMD][data...][checksum]
+# where byte[2]=LEN (payload length + 1) and byte[3]=CMD.
+NATIVE_CMD_CREATE_DEVICE = 0x07   # CMD=7:  create a new device (X2: 210-byte data)
+NATIVE_CMD_COMMIT_DEVICE = 0x08   # CMD=8:  commit/save device config
+NATIVE_CMD_SYNC_KEY = 0x0E        # CMD=14: sync a key/command to a device
+
 # IP command synchronization (existing devices)
 OP_REQ_IPCMD_SYNC = 0x0C02
 OP_IPCMD_ROW_A = 0x0DD3
@@ -309,6 +316,9 @@ __all__ = [
     "OP_DEVICE_SAVE_HEAD",
     "OP_SAVE_COMMIT",
     "ACK_SUCCESS",
+    "NATIVE_CMD_CREATE_DEVICE",
+    "NATIVE_CMD_COMMIT_DEVICE",
+    "NATIVE_CMD_SYNC_KEY",
     "OP_REQ_IPCMD_SYNC",
     "OP_IPCMD_ROW_A",
     "OP_IPCMD_ROW_B",
