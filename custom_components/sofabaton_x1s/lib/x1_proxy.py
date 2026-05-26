@@ -644,7 +644,6 @@ class X1Proxy:
 
         For CMD=7 (create), pass ``device_id=0xFF`` (hub assigns a new ID).
         For CMD=8 (commit), pass the hub-assigned ``device_id``.
-        X1S hubs use UTF-16LE encoding for name fields.
         """
         d = bytearray(210)
         d[0] = 0x01
@@ -655,8 +654,8 @@ class X1Proxy:
         d[6] = (device_id & 0xFF) if commit else 0x00
         d[7] = 28                                          # codeType: WiFi DIY
         d[8] = 16                                          # type: WiFi
-        d[29:89] = self._utf16le_padded(name, length=60)
-        d[89:149] = self._utf16le_padded(name, length=60)  # brand = name
+        d[29:89] = self._utf16be_padded(name, length=60)
+        d[89:149] = self._utf16be_padded(name, length=60)  # brand = name
 
         cfg = bytearray(60)
         if target_ip:
@@ -687,7 +686,7 @@ class X1Proxy:
         port: int,
         pulse: str,
     ) -> bytes:
-        """Build CMD=14 key-sync frame in X2 format (81-byte overhead, UTF-16LE)."""
+        """Build CMD=14 key-sync frame in X2 format (81-byte overhead)."""
         pulse_bytes = pulse.encode("ascii", errors="replace")
         pulse_len = len(pulse_bytes)
 
@@ -707,7 +706,7 @@ class X1Proxy:
         kd[3] = device_id & 0xFF
         kd[4] = key_id & 0xFF
         kd[5] = 0x1C                                      # codeType: WiFi DIY
-        kd[12:72] = self._utf16le_padded(key_name, length=60)
+        kd[12:72] = self._utf16be_padded(key_name, length=60)
         kd[72 : 72 + len(ip_block)] = ip_block
         kd[key_data_len - 1] = _sum8(kd[: key_data_len - 1])
 
@@ -730,6 +729,7 @@ class X1Proxy:
         method: str,
         url: str,
         headers: dict[str, str],
+        body: str = "",
     ) -> str:
         """Build the raw HTTP request string the hub sends when a key is pressed."""
         from urllib.parse import urlparse
@@ -744,7 +744,11 @@ class X1Proxy:
         parts = [f"{method} {path} HTTP/1.1\r\n", f"Host:{host}:{port}\r\n"]
         for k, v in headers.items():
             parts.append(f"{k}:{v}\r\n")
+        if body:
+            parts.append(f"Content-Length:{len(body.encode('ascii', errors='replace'))}\r\n")
         parts.append("\r\n")
+        if body:
+            parts.append(body)
         return "".join(parts)
 
     def _send_native_frame(self, cmd: int, overhead: bytes, data: bytes) -> None:
@@ -4680,6 +4684,7 @@ class X1Proxy:
         method: str,
         url: str,
         headers: dict[str, str],
+        body: str = "",
     ) -> dict[str, Any] | None:
         """Create a new IP device on the hub with one button.
 
@@ -4713,7 +4718,7 @@ class X1Proxy:
         self._log.info("[CREATE] hub assigned device_id=%d", device_id)
 
         # --- CMD=14: key sync ---
-        pulse = self._build_ip_pulse(method, url, headers)
+        pulse = self._build_ip_pulse(method, url, headers, body=body)
         key_frame = self._build_key_frame_x2(
             key_index=0,
             total_keys=1,
@@ -4790,6 +4795,7 @@ class X1Proxy:
         headers: dict[str, str],
         key_index: int = 1,
         device_name: str | None = None,
+        body: str = "",
     ) -> dict[str, Any] | None:
         """Add an IP-backed command to an existing device.
 
@@ -4815,7 +4821,7 @@ class X1Proxy:
         overhead = b"\x01" + (1).to_bytes(2, "big")
 
         # --- CMD=14: key sync ---
-        pulse = self._build_ip_pulse(method, url, headers)
+        pulse = self._build_ip_pulse(method, url, headers, body=body)
         key_frame = self._build_key_frame_x2(
             key_index=key_index,
             total_keys=total_keys,

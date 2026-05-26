@@ -1601,6 +1601,7 @@ async def _async_handle_create_ip_button(call: ServiceCall):
     method = call.data.get("method", "GET").upper()
     url = call.data["url"]
     headers = {str(k): str(v) for k, v in (call.data.get("headers") or {}).items()}
+    body = str(call.data.get("body", ""))
 
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -1625,6 +1626,7 @@ async def _async_handle_create_ip_button(call: ServiceCall):
                 headers=headers,
                 key_index=key_index,
                 device_name=device_name,
+                body=body,
             ),
         )
     else:
@@ -1636,6 +1638,7 @@ async def _async_handle_create_ip_button(call: ServiceCall):
                 method=method,
                 url=url,
                 headers=headers,
+                body=body,
             ),
         )
 
