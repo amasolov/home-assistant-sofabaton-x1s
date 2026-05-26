@@ -4980,14 +4980,21 @@ class X1Proxy:
         *,
         activity_name: str,
         member_device_ids: list[int],
+        power_on_steps: list[tuple] | None = None,
+        power_off_steps: list[tuple] | None = None,
         icon: int = 1,
         color_id: int = 0,
     ) -> dict[str, Any] | None:
-        """Create a new activity on the hub with power-on/off macros.
+        """Create a new activity on the hub with optional power macros.
 
         ``member_device_ids`` is the list of device IDs to include.
         The hub assigns the activity ID automatically.
-        Power macros trigger key 198 (on) / 199 (off) for each member.
+
+        ``power_on_steps`` / ``power_off_steps`` are lists of tuples for
+        the CMD=18 macro:
+          ("cmd", device_id, key_index)  — fire a button
+          ("delay", seconds)             — pause
+        If ``None``, the corresponding macro is skipped entirely.
         """
         if not self.can_issue_commands():
             self._log.info("[ACTIVITY] create_activity ignored: proxy client is connected")
@@ -5014,34 +5021,28 @@ class X1Proxy:
         self._log.info("[ACTIVITY] hub assigned activity_id=%d", activity_id)
 
         # --- CMD=18: POWER_ON macro (key 198) ---
-        on_steps: list = []
-        for dev_id in member_device_ids:
-            on_steps.append(("cmd", dev_id, 198))
-            on_steps.append(("delay", 1))
-
-        on_frames = self._build_macro_frames_x2(activity_id, 198, on_steps, macro_name="Power On")
-
-        time.sleep(1)
-        self._log.info("[ACTIVITY] sending CMD=18 POWER_ON macro (%d steps)", len(on_steps))
-        for frame in on_frames:
-            self.transport.send_local(frame)
-            if self.diag_dump:
-                self._log.info("[DUMP] →hub %s", _hexdump(frame))
+        if power_on_steps:
+            on_frames = self._build_macro_frames_x2(
+                activity_id, 198, power_on_steps, macro_name="Power On",
+            )
+            time.sleep(1)
+            self._log.info("[ACTIVITY] sending CMD=18 POWER_ON macro (%d steps)", len(power_on_steps))
+            for frame in on_frames:
+                self.transport.send_local(frame)
+                if self.diag_dump:
+                    self._log.info("[DUMP] →hub %s", _hexdump(frame))
 
         # --- CMD=18: POWER_OFF macro (key 199) ---
-        off_steps: list = []
-        for dev_id in member_device_ids:
-            off_steps.append(("cmd", dev_id, 199))
-            off_steps.append(("delay", 1))
-
-        off_frames = self._build_macro_frames_x2(activity_id, 199, off_steps, macro_name="Power Off")
-
-        time.sleep(1)
-        self._log.info("[ACTIVITY] sending CMD=18 POWER_OFF macro (%d steps)", len(off_steps))
-        for frame in off_frames:
-            self.transport.send_local(frame)
-            if self.diag_dump:
-                self._log.info("[DUMP] →hub %s", _hexdump(frame))
+        if power_off_steps:
+            off_frames = self._build_macro_frames_x2(
+                activity_id, 199, power_off_steps, macro_name="Power Off",
+            )
+            time.sleep(1)
+            self._log.info("[ACTIVITY] sending CMD=18 POWER_OFF macro (%d steps)", len(power_off_steps))
+            for frame in off_frames:
+                self.transport.send_local(frame)
+                if self.diag_dump:
+                    self._log.info("[DUMP] →hub %s", _hexdump(frame))
 
         # --- REMOTE_SYNC ---
         sync_frame = self._build_frame(OP_REMOTE_SYNC, b"")
