@@ -4685,6 +4685,7 @@ class X1Proxy:
         url: str,
         headers: dict[str, str],
         body: str = "",
+        icon: int = 1,
     ) -> dict[str, Any] | None:
         """Create a new IP device on the hub with one button.
 
@@ -4701,7 +4702,7 @@ class X1Proxy:
         # --- CMD=7: create device ---
         target_ip = self._extract_host(url)
         create_data = self._build_device_data_x2(
-            device_name, device_id=0xFF, target_ip=target_ip,
+            device_name, device_id=0xFF, target_ip=target_ip, icon=icon,
         )
         create_frame = self._build_native_frame(0x07, overhead, create_data)
 
