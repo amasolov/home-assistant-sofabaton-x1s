@@ -4750,17 +4750,6 @@ class X1Proxy:
         if self.diag_dump:
             self._log.info("[DUMP] →hub %s", _hexdump(commit_frame))
 
-        # --- CMD=0x41: disable automatic power control ---
-        self.start_roku_create()
-        time.sleep(1)
-        self._log.info("[CREATE] sending CMD=0x41 (disable power control) dev=%d", device_id)
-        self._send_roku_step(
-            step_name=f"power-disable[dev={device_id}]",
-            family=0x41,
-            payload=bytes([device_id, 0x00]),
-            ack_opcode=0x0103,
-        )
-
         # --- REMOTE_SYNC ---
         sync_frame = self._build_frame(OP_REMOTE_SYNC, b"")
 
@@ -5093,6 +5082,26 @@ class X1Proxy:
             "members": member_device_ids,
             "status": "success",
         }
+
+    def disable_device_power_control(self, device_id: int) -> bool:
+        """Send CMD=0x41 to disable automatic power control for a device.
+
+        Must be called after all buttons have been added and committed.
+        Uses the same mechanism as the existing power-config-enable
+        (family=0x41, second byte=0x01) but with 0x00 to disable.
+        """
+        if not self.can_issue_commands():
+            return False
+
+        self.start_roku_create()
+        self._log.info("[POWER] disabling automatic power control for dev=%d", device_id)
+        return self._send_roku_step(
+            step_name=f"power-disable[dev={device_id}]",
+            family=0x41,
+            payload=bytes([device_id, 0x00]),
+            ack_opcode=0x0103,
+            timeout=5.0,
+        )
 
     def delete_activity(self, activity_id: int) -> bool:
         """Delete an activity from the hub using CMD=57."""
