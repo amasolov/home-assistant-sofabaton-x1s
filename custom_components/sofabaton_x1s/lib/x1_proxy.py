@@ -375,6 +375,7 @@ class X1Proxy:
         self._activation_listeners: list[callable] = []
         self._app_devices_deadline: float | None = None
         self._app_devices_retry_sent = False
+        self.native_creating = False
         self._pending_virtual: dict[str, Any] | None = None
         self._pending_virtual_event = threading.Event()
         self._pending_virtual_lock = threading.Lock()
@@ -637,23 +638,35 @@ class X1Proxy:
         device_id: int = 0xFF,
         sign: int = 0,
         commit: bool = False,
+        target_ip: str = "",
     ) -> bytes:
-        """Build 210-byte X2 device payload for CMD=7 (create) or CMD=8 (commit)."""
+        """Build 210-byte X2 device payload for CMD=7 (create) or CMD=8 (commit).
+
+        For CMD=7 (create), pass ``device_id=0xFF`` (hub assigns a new ID).
+        For CMD=8 (commit), pass the hub-assigned ``device_id``.
+        X1S hubs use UTF-16LE encoding for name fields.
+        """
         d = bytearray(210)
         d[0] = 0x01
         d[1:3] = (1).to_bytes(2, "big")
         d[3] = sign & 0xFF
         d[4] = device_id & 0xFF
         d[5] = icon & 0xFF
-        d[6] = 0x00                                        # sort
+        d[6] = (device_id & 0xFF) if commit else 0x00
         d[7] = 28                                          # codeType: WiFi DIY
         d[8] = 16                                          # type: WiFi
-        d[29:89] = self._utf16be_padded(name, length=60)
-        d[89:149] = self._utf16be_padded(name, length=60)  # brand = name
+        d[29:89] = self._utf16le_padded(name, length=60)
+        d[89:149] = self._utf16le_padded(name, length=60)  # brand = name
 
         cfg = bytearray(60)
+        if target_ip:
+            cfg[0] = 0xFC
+            cfg[1] = 0x55
+            for i, octet in enumerate(target_ip.split(".")[:4]):
+                cfg[2 + i] = int(octet) & 0xFF
         cfg[6] = 0xFC
         cfg[9] = 0xFC
+        cfg[10] = 0x02                                     # inputModel: WiFi
         cfg[14] = 0xFC
         cfg[16] = 0xFC
         if commit:
@@ -674,7 +687,7 @@ class X1Proxy:
         port: int,
         pulse: str,
     ) -> bytes:
-        """Build CMD=14 key-sync frame in X2 format (81-byte overhead, UTF-16BE)."""
+        """Build CMD=14 key-sync frame in X2 format (81-byte overhead, UTF-16LE)."""
         pulse_bytes = pulse.encode("ascii", errors="replace")
         pulse_len = len(pulse_bytes)
 
@@ -694,7 +707,7 @@ class X1Proxy:
         kd[3] = device_id & 0xFF
         kd[4] = key_id & 0xFF
         kd[5] = 0x1C                                      # codeType: WiFi DIY
-        kd[12:72] = self._utf16be_padded(key_name, length=60)
+        kd[12:72] = self._utf16le_padded(key_name, length=60)
         kd[72 : 72 + len(ip_block)] = ip_block
         kd[key_data_len - 1] = _sum8(kd[: key_data_len - 1])
 
@@ -4681,7 +4694,10 @@ class X1Proxy:
         overhead = b"\x01" + (1).to_bytes(2, "big")  # action=1, count=1
 
         # --- CMD=7: create device ---
-        create_data = self._build_device_data_x2(device_name, device_id=0xFF)
+        target_ip = self._extract_host(url)
+        create_data = self._build_device_data_x2(
+            device_name, device_id=0xFF, target_ip=target_ip,
+        )
         create_frame = self._build_native_frame(0x07, overhead, create_data)
 
         self.start_roku_create()
@@ -4718,6 +4734,7 @@ class X1Proxy:
         # --- CMD=8: commit ---
         commit_data = self._build_device_data_x2(
             device_name, device_id=device_id, commit=True,
+            target_ip=target_ip,
         )
         commit_frame = self._build_native_frame(0x08, overhead, commit_data)
 
@@ -4814,8 +4831,10 @@ class X1Proxy:
             self._log.info("[DUMP] →hub %s", _hexdump(key_frame))
 
         # --- CMD=8: commit ---
+        target_ip = self._extract_host(url)
         commit_data = self._build_device_data_x2(
             device_name, device_id=device_id, commit=True,
+            target_ip=target_ip,
         )
         commit_frame = self._build_native_frame(0x08, overhead, commit_data)
 
@@ -5060,6 +5079,9 @@ class X1Proxy:
             self._app_devices_deadline = None
 
     def _send_cmd_frame(self, opcode: int, payload: bytes) -> None:
+        if self.native_creating and opcode == OP_REQ_DEVICES:
+            self._log.info("[CMD] suppressing REQ_DEVICES during native create")
+            return
         frame = self._build_frame(opcode, payload)
         if opcode == OP_REQ_DEVICES:
             self._begin_device_request()
