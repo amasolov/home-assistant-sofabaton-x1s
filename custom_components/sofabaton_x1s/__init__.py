@@ -1624,6 +1624,7 @@ async def _async_handle_create_ip_button(call: ServiceCall):
                 url=url,
                 headers=headers,
                 key_index=key_index,
+                device_name=device_name,
             ),
         )
     else:

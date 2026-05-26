@@ -4789,6 +4789,7 @@ class X1Proxy:
         url: str,
         headers: dict[str, str],
         key_index: int = 1,
+        device_name: str | None = None,
     ) -> dict[str, Any] | None:
         """Add an IP-backed command to an existing device.
 
@@ -4798,6 +4799,9 @@ class X1Proxy:
         ``key_index`` is the 0-based position of this button within the
         device (0 is the first button created with the device itself).
         The caller must track and increment this for each button added.
+
+        ``device_name`` should be the original name used when creating
+        the device.  Falls back to cached state or a generic placeholder.
         """
         if not self.can_issue_commands():
             self._log.info("[CREATE] add_ip_button_to_device ignored: proxy client is connected")
@@ -4806,7 +4810,8 @@ class X1Proxy:
         key_id = key_index
         total_keys = key_index + 1
 
-        device_name = self.state.devices.get(device_id & 0xFF, {}).get("name", f"Device {device_id}")
+        if device_name is None:
+            device_name = self.state.devices.get(device_id & 0xFF, {}).get("name", f"Device {device_id}")
         overhead = b"\x01" + (1).to_bytes(2, "big")
 
         # --- CMD=14: key sync ---
