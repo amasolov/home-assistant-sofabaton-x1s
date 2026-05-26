@@ -4719,12 +4719,13 @@ class X1Proxy:
         self._log.info("[CREATE] hub assigned device_id=%d", device_id)
 
         # --- CMD=14: key sync ---
+        # Hub uses 1-based button slots (matching the app's slot = idx + 1).
         pulse = self._build_ip_pulse(method, url, headers, body=body)
         key_frame = self._build_key_frame_x2(
-            key_index=0,
+            key_index=1,
             total_keys=1,
             device_id=device_id,
-            key_id=0,
+            key_id=1,
             key_name=button_name,
             ip=self._extract_host(url),
             port=self._extract_port(url),
@@ -4816,7 +4817,7 @@ class X1Proxy:
             return None
 
         key_id = key_index
-        total_keys = key_index + 1
+        total_keys = key_index
 
         if device_name is None:
             device_name = self.state.devices.get(device_id & 0xFF, {}).get("name", f"Device {device_id}")
@@ -5048,7 +5049,22 @@ class X1Proxy:
 
         # --- Assign member devices via OP_ACTIVITY_DEVICE_CONFIRM ---
         if member_device_ids:
-            time.sleep(1)
+            time.sleep(2)
+            act_lo = activity_id & 0xFF
+
+            self._activity_map_complete.discard(act_lo)
+            self.state.activity_members.pop(act_lo, None)
+            self.state.activity_command_refs.pop(act_lo, None)
+            self.state.activity_favorite_slots.pop(act_lo, None)
+            self.state.activity_keybinding_slots.pop(act_lo, None)
+            self.state.activity_favorite_labels.pop(act_lo, None)
+            self.state.activity_keybinding_labels.pop(act_lo, None)
+            self._clear_favorite_label_requests_for_activity(act_lo)
+
+            self._log.info("[ACTIVITY] requesting activity mapping for act=0x%02X", act_lo)
+            if self.request_activity_mapping(act_lo):
+                self._wait_for_activity_map_burst(act_lo, timeout=5.0)
+
             self._log.info(
                 "[ACTIVITY] assigning %d member devices to activity %d: %s",
                 len(member_device_ids), activity_id, member_device_ids,
@@ -5058,7 +5074,7 @@ class X1Proxy:
                 payload = bytes([member_id & 0xFF, 0x00])
                 self._log.info(
                     "[ACTIVITY] confirm member dev=0x%02X for act=0x%02X",
-                    member_id & 0xFF, activity_id & 0xFF,
+                    member_id & 0xFF, act_lo,
                 )
                 self._send_cmd_frame(OP_ACTIVITY_DEVICE_CONFIRM, payload)
                 ack = self.wait_for_roku_ack_any([(0x0103, None)], timeout=5.0)
