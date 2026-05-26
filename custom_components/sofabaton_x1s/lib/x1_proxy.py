@@ -4879,6 +4879,204 @@ class X1Proxy:
         }
 
     # ---------------------------------------------------------------------
+    # Activity creation (native protocol)
+    # ---------------------------------------------------------------------
+
+    def _build_activity_data_x2(
+        self,
+        name: str,
+        *,
+        icon: int = 1,
+        activity_id: int = 0xFF,
+        color_id: int = 0,
+    ) -> bytes:
+        """Build 210-byte payload for CMD=55 (create activity)."""
+        d = bytearray(210)
+        d[0] = 0x01
+        d[1:3] = (1).to_bytes(2, "big")
+        d[3] = 0  # sign
+        d[4] = activity_id & 0xFF
+        d[5] = icon & 0xFF
+        d[6] = 0  # sort
+        d[29:89] = self._utf16be_padded(name, length=60)
+        d[89:149] = self._utf16be_padded(name, length=60)  # brand = name
+
+        cfg = bytearray(60)
+        cfg[0] = 0xFC
+        cfg[1] = 0x00
+        cfg[2] = 0xFC
+        cfg[3] = 0x00
+        cfg[22] = color_id & 0xFF
+        d[149:209] = cfg
+        d[209] = _sum8(d[:209])
+        return bytes(d)
+
+    def _build_macro_frames_x2(
+        self,
+        activity_id: int,
+        key_id: int,
+        steps: list[tuple[str, int, int] | tuple[str, int]],
+        macro_name: str = "",
+    ) -> list[bytes]:
+        """Build CMD=18 macro save frames for an activity.
+
+        ``steps`` is a list of tuples:
+          ("cmd", device_id, key_id)    — command step (power-on/off)
+          ("delay", seconds)            — delay step
+        """
+        step_count = len(steps)
+        step_data = bytearray()
+        for step in steps:
+            if step[0] == "delay":
+                sd = bytearray(10)
+                for i in range(9):
+                    sd[i] = 0xFF
+                sd[9] = step[1] & 0xFF
+                step_data += sd
+            else:
+                # ("cmd", device_id, key_id)
+                sd = bytearray(10)
+                sd[0] = step[1] & 0xFF  # device_id
+                sd[1] = step[2] & 0xFF  # key_id (198=power_on, 199=power_off)
+                # fid[6] = zeros for power keys
+                sd[8] = 1  # duration
+                sd[9] = 0xFF
+                step_data += sd
+
+        name_bytes = self._utf16be_padded(macro_name, length=60)
+        inner_len = len(step_data) + 6 + 60 + 1  # header(6) + name(60) + checksum(1)
+
+        inner = bytearray(inner_len)
+        total_pages = (inner_len + 246) // 247
+        inner[0] = 0x01
+        inner[1:3] = total_pages.to_bytes(2, "big")
+        inner[3] = activity_id & 0xFF
+        inner[4] = key_id & 0xFF
+        inner[5] = step_count & 0xFF
+        inner[6 : 6 + len(step_data)] = step_data
+        inner[6 + len(step_data) : 6 + len(step_data) + 60] = name_bytes
+        inner[-1] = _sum8(inner[:-1])
+
+        frames = []
+        for page_idx in range(total_pages):
+            offset = page_idx * 247
+            end = min(offset + 247, inner_len)
+            chunk = inner[offset:end]
+            chunk_len = len(chunk)
+            f = bytearray(chunk_len + 8)
+            f[0] = 0xA5
+            f[1] = 0x5A
+            f[2] = (chunk_len + 3) & 0xFF
+            f[3] = 18  # CMD=18 (macro save)
+            f[4] = 0x01
+            f[5:7] = (page_idx + 1).to_bytes(2, "big")
+            f[7 : 7 + chunk_len] = chunk
+            f[-1] = _sum8(f[:-1])
+            frames.append(bytes(f))
+        return frames
+
+    def create_activity(
+        self,
+        *,
+        activity_name: str,
+        member_device_ids: list[int],
+        icon: int = 1,
+        color_id: int = 0,
+    ) -> dict[str, Any] | None:
+        """Create a new activity on the hub with power-on/off macros.
+
+        ``member_device_ids`` is the list of device IDs to include.
+        The hub assigns the activity ID automatically.
+        Power macros trigger key 198 (on) / 199 (off) for each member.
+        """
+        if not self.can_issue_commands():
+            self._log.info("[ACTIVITY] create_activity ignored: proxy client is connected")
+            return None
+
+        overhead = b"\x01" + (1).to_bytes(2, "big")
+
+        # --- CMD=55: create activity ---
+        create_data = self._build_activity_data_x2(
+            activity_name, icon=icon, activity_id=0xFF, color_id=color_id,
+        )
+        create_frame = self._build_native_frame(55, overhead, create_data)
+
+        self.start_roku_create()
+        self._log.info("[ACTIVITY] sending CMD=55 (create) for '%s'", activity_name)
+        self.transport.send_local(create_frame)
+        if self.diag_dump:
+            self._log.info("[DUMP] →hub %s", _hexdump(create_frame))
+
+        activity_id = self.wait_for_roku_device_id(timeout=5.0)
+        if activity_id is None:
+            self._log.warning("[ACTIVITY] hub did not assign activity_id after CMD=55")
+            return None
+        self._log.info("[ACTIVITY] hub assigned activity_id=%d", activity_id)
+
+        # --- CMD=18: POWER_ON macro (key 198) ---
+        on_steps: list = []
+        for dev_id in member_device_ids:
+            on_steps.append(("cmd", dev_id, 198))
+            on_steps.append(("delay", 1))
+
+        on_frames = self._build_macro_frames_x2(activity_id, 198, on_steps, macro_name="Power On")
+
+        time.sleep(1)
+        self._log.info("[ACTIVITY] sending CMD=18 POWER_ON macro (%d steps)", len(on_steps))
+        for frame in on_frames:
+            self.transport.send_local(frame)
+            if self.diag_dump:
+                self._log.info("[DUMP] →hub %s", _hexdump(frame))
+
+        # --- CMD=18: POWER_OFF macro (key 199) ---
+        off_steps: list = []
+        for dev_id in member_device_ids:
+            off_steps.append(("cmd", dev_id, 199))
+            off_steps.append(("delay", 1))
+
+        off_frames = self._build_macro_frames_x2(activity_id, 199, off_steps, macro_name="Power Off")
+
+        time.sleep(1)
+        self._log.info("[ACTIVITY] sending CMD=18 POWER_OFF macro (%d steps)", len(off_steps))
+        for frame in off_frames:
+            self.transport.send_local(frame)
+            if self.diag_dump:
+                self._log.info("[DUMP] →hub %s", _hexdump(frame))
+
+        # --- REMOTE_SYNC ---
+        sync_frame = self._build_frame(OP_REMOTE_SYNC, b"")
+        time.sleep(1)
+        self._log.info("[ACTIVITY] sending REMOTE_SYNC")
+        self.transport.send_local(sync_frame)
+
+        time.sleep(1)
+        self._log.info("[ACTIVITY] created activity '%s' id=%d members=%s", activity_name, activity_id, member_device_ids)
+        return {
+            "activity_name": activity_name,
+            "activity_id": activity_id,
+            "members": member_device_ids,
+            "status": "success",
+        }
+
+    def delete_activity(self, activity_id: int) -> bool:
+        """Delete an activity from the hub using CMD=57."""
+        if not self.can_issue_commands():
+            self._log.info("[ACTIVITY] delete_activity ignored: proxy client is connected")
+            return False
+
+        act_lo = activity_id & 0xFF
+        self.start_roku_create()
+
+        # CMD=57 delete activity, same frame structure as CMD=9 for devices
+        return self._send_roku_step(
+            step_name=f"delete-activity[act=0x{act_lo:02X}]",
+            family=57,
+            payload=bytes([act_lo]),
+            ack_opcode=0x0103,
+            timeout=10.0,
+        )
+
+    # ---------------------------------------------------------------------
     # mDNS advertisement
     # ---------------------------------------------------------------------
     def _start_mdns(self) -> None:
