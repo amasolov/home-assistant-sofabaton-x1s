@@ -4740,7 +4740,7 @@ class X1Proxy:
         # --- CMD=8: commit ---
         commit_data = self._build_device_data_x2(
             device_name, device_id=device_id, commit=True,
-            target_ip=target_ip,
+            target_ip=target_ip, icon=icon,
         )
         commit_frame = self._build_native_frame(0x08, overhead, commit_data)
 
@@ -4797,6 +4797,7 @@ class X1Proxy:
         key_index: int = 1,
         device_name: str | None = None,
         body: str = "",
+        icon: int = 1,
     ) -> dict[str, Any] | None:
         """Add an IP-backed command to an existing device.
 
@@ -4846,7 +4847,7 @@ class X1Proxy:
         target_ip = self._extract_host(url)
         commit_data = self._build_device_data_x2(
             device_name, device_id=device_id, commit=True,
-            target_ip=target_ip,
+            target_ip=target_ip, icon=icon,
         )
         commit_frame = self._build_native_frame(0x08, overhead, commit_data)
 
