@@ -4750,6 +4750,17 @@ class X1Proxy:
         if self.diag_dump:
             self._log.info("[DUMP] →hub %s", _hexdump(commit_frame))
 
+        # --- CMD=0x41: disable automatic power control ---
+        self.start_roku_create()
+        time.sleep(1)
+        self._log.info("[CREATE] sending CMD=0x41 (disable power control) dev=%d", device_id)
+        self._send_roku_step(
+            step_name=f"power-disable[dev={device_id}]",
+            family=0x41,
+            payload=bytes([device_id, 0x00]),
+            ack_opcode=0x0103,
+        )
+
         # --- REMOTE_SYNC ---
         sync_frame = self._build_frame(OP_REMOTE_SYNC, b"")
 
@@ -5045,6 +5056,28 @@ class X1Proxy:
                 self.transport.send_local(frame)
                 if self.diag_dump:
                     self._log.info("[DUMP] →hub %s", _hexdump(frame))
+
+        # --- Assign member devices via OP_ACTIVITY_DEVICE_CONFIRM ---
+        if member_device_ids:
+            time.sleep(1)
+            self._log.info(
+                "[ACTIVITY] assigning %d member devices to activity %d: %s",
+                len(member_device_ids), activity_id, member_device_ids,
+            )
+            self.start_roku_create()
+            for member_id in member_device_ids:
+                payload = bytes([member_id & 0xFF, 0x00])
+                self._log.info(
+                    "[ACTIVITY] confirm member dev=0x%02X for act=0x%02X",
+                    member_id & 0xFF, activity_id & 0xFF,
+                )
+                self._send_cmd_frame(OP_ACTIVITY_DEVICE_CONFIRM, payload)
+                ack = self.wait_for_roku_ack_any([(0x0103, None)], timeout=5.0)
+                if ack is None:
+                    self._log.warning(
+                        "[ACTIVITY] missing ACK after member confirm dev=0x%02X",
+                        member_id & 0xFF,
+                    )
 
         # --- REMOTE_SYNC ---
         sync_frame = self._build_frame(OP_REMOTE_SYNC, b"")
